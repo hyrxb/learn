@@ -1,2 +1,2 @@
 # learn
-learan
+learn
