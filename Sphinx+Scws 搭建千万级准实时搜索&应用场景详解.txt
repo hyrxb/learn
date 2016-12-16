@@ -1,0 +1,512 @@
+目标：
+一、搭建准确的千万级数据库的准实时搜索（见详情）
+二、实现词语高亮（客户端JS渲染，服务器端渲染，详见7.3）
+三、实现搜索联想（输入框onchange,ajax请求搜索，取10条在层上展示方可）
+四、实现词库管理（仅需管理scws下的自定义词库dd.txt即可）
+五、实现全文搜索（提供了两种方案，详见8）
+案例：
+本文第五部分，针对实际应用场景，典型案例分析。
+软件：
+sphinx: sphinx-2.0.2-beta
+scws: scws-1.2.0
+===========================================================================
+一、Sphinx安装
+1、安装
+
+
+# ./configure --prefix=/opt/server/sphinx --with-mysql=/opt/server/mysql 
+# make
+# make install
+2、配置
+见sphinx.conf
+详见下文，多索引增量索引方案
+3、php 扩展
+性能方面，扩展和直接使用API文件，差别不大；可以做选择；都在源码API中；
+个人建议使用API文件，系统更稳定
+3.1 sphinx客户端libsphinxclient
+
+
+# ./configure --prefix=/opt/server/libsphinxclient
+# make
+# make install
+3.2 扩展
+下载 http://pecl.php.net/package/sphinx
+
+
+# /opt/server/php/bin/phpize./configure --with-sphinx=/opt/server/libsphinxclient --with-php-config=/opt/server/php/bin/php-config
+# make
+# make install 
+查看
+# /opt/server/php/bin/php -m |grep sphinx
+使用手册
+http://docs.php.net/manual/zh/book.sphinx.php
+4、索引 启动服务
+
+
+# /opt/server/sphinx/bin/indexer --all 
+# /opt/server/sphinx/bin/searchd
+二、php 分词 scws
+官网 http://www.ftphp.com/scws/
+1、 安装
+
+
+# ./configure --prefix=/opt/server/scws
+# make
+# make install
+2、 词库
+scws-dict-chs-utf8.tar.bz2 解压放入 /opt/server/scws/etc
+词库 dict.utf-8.xdb
+规则 rules.utf-8.ini
+3、 php 扩展
+源码在phpext下
+
+
+# /opt/server/php/bin/phpize./configure --with-scws=/opt/server/scws --with-php-config=/opt/server/php/bin/php-config
+# make
+# make install
+
+
+# vi php.ini
+[scws] 
+extension = scws.so 
+scws.default.charset = utf-8 
+scws.default.fpath = /opt/server/scws/etc 
+查看 
+# /opt/server/php/bin/php -m |grep scws
+4、 分词测试
+http://www.ftphp.com/scws/docs.php
+详见测试文件 test_all.php
+三、 索引
+
+
+//索引某个索引 
+# /opt/server/sphinx/bin/indexer test1 
+//searchd 索引某个索引 
+# /opt/server/sphinx/bin/indexer test1 --rotate 
+//指定索引搜索 
+# /opt/server/sphinx/bin/indexer -i test1 '逗她男'
+1、 增量索引方案
+
+
+//创建表记录偏移
+CREATE TABLE IF NOT EXISTS `search_counter` ( 
+ `counterid` int(11) unsigned NOT NULL AUTO_INCREMENT COMMENT '统计标示', 
+ `max_doc_id` int(11) unsigned NOT NULL COMMENT '已统计数', 
+ PRIMARY KEY (`counterid`) 
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 AUTO_INCREMENT=1 ; 
+//增量索引 
+# /opt/server/sphinx/bin/indexer test1stemmed --rotate 
+//合并索引 
+# /opt/server/sphinx/bin/indexer --merge test1 test1stemmed --rotate
+索引策略
+1、搜索时，同时从主索引和增量索引取数据
+2、每5分钟，运行一次增量索引；满足新数据搜索需求
+3、每晚，运行一次主索引，同时会更新索引标示；再运行增量索引，实质为清空增量索引，避免与主索引重复索引
+4、好处：避免开合并索引，合并索引效率较差
+5、如数据量特别大，可考虑合并索引的方案
+索引策略shell
+
+
+//add.sh 
+#!/bin/sh 
+/opt/server/sphinx/bin/indexer test1stemmed --rotate >> /opt/server/sphinx/var/log/add.sh.log 
+//all.sh 
+#!/bin/sh 
+/opt/server/sphinx/bin/indexer test1 --rotate >> /opt/server/sphinx/var/log/all.sh.log 
+/opt/server/sphinx/bin/indexer test1stemmed --rotate >> /opt/server/sphinx/var/log/add.sh.log
+四、 多个表独立索引方案
+场景：如有用户搜索、商品搜索等多个索引需求
+策略：配置一个多索引方案，每个表单独建立索引
+前端根据不同类型选择不同的查询索引；全部，即选择所有索引
+===========================================================================
+五、性能及应用场景总结
+1、基础数据、假如我们是一家商城；有用户user，商品goods，以及增量索引计数表search_counter。
+
+
+-- 
+-- 数据库: `sphinx` 
+--
+-- --------------------------------------------------------
+-- 
+-- 表的结构 `goods` 
+--
+CREATE TABLE IF NOT EXISTS `goods` ( 
+`id` int(10) unsigned NOT NULL AUTO_INCREMENT COMMENT '商品ID', 
+`name` varchar(50) NOT NULL COMMENT '商品名称', 
+`price` int(11) NOT NULL COMMENT '商品价格', 
+PRIMARY KEY (`id`) 
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 AUTO_INCREMENT=1 ;
+-- --------------------------------------------------------
+-- 
+-- 表的结构 `user` 
+--
+CREATE TABLE IF NOT EXISTS `user` ( 
+`id` int(10) unsigned NOT NULL AUTO_INCREMENT COMMENT '用户ID', 
+`name` varchar(50) NOT NULL COMMENT '用户昵称', 
+`info` text NOT NULL COMMENT '用户简介', 
+PRIMARY KEY (`id`) 
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 AUTO_INCREMENT=1 ;
+-- --------------------------------------------------------
+-- 
+-- 表的结构 `search_counter` 
+--
+CREATE TABLE IF NOT EXISTS `search_counter` ( 
+`counterid` int(11) unsigned NOT NULL AUTO_INCREMENT COMMENT '统计标示', 
+`max_doc_id` int(11) unsigned NOT NULL COMMENT '已统计数', 
+PRIMARY KEY (`counterid`) 
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 AUTO_INCREMENT=1 ;
+-- --------------------------------------------------------
+-- 
+-- 统计初始值 `search_counter` 
+--
+INSERT INTO `search_counter` (`counterid`, `max_doc_id`) VALUES 
+(1, 0), 
+(2, 0);
+2、编写配置文件 sphinx.conf
+
+# 
+# 多个索引策略 
+# 
+ 
+# 全部用户 
+source userbasesrc 
+{ 
+type= mysql 
+ 
+sql_host= 127.0.0.1 
+sql_user= root 
+sql_pass= 123456 
+sql_db= sphinx 
+sql_port= 3306 
+sql_query_pre = SET NAMES UTF8 
+sql_query_pre = REPLACE INTO search_counter SELECT 1,MAX(id) FROM user? #创建主索引前更改标识位置 
+sql_query = SELECT id,name,info FROM user 
+#sql_attr_uint= name 
+ 
+sql_query_info= SELECT * FROM user WHERE id=$id
+} 
+ 
+index userbase 
+{ 
+source= userbasesrc 
+path= /opt/server/sphinx/var/data/userbase
+docinfo = extern 
+mlock = 0 
+min_prefix_len= 0 
+min_infix_len = 0 
+min_word_len= 1 
+charset_type= utf-8 
+charset_table = U+FF10..U+FF19->0..9, 0..9, U+FF41..U+FF5A->a..z, U+FF21..U+FF3A->a..z,A..Z->a..z, a..z, U+0149, U+017F, U+0138, U+00DF, U+00FF, U+00C0..U+00D6->U+00E0..U+00F6,U+00E0..U+00F6, U+00D8..U+00DE->U+00F8..U+00FE, U+00F8..U+00FE, U+0100->U+0101, U+0101,U+0102->U+0103, U+0103, U+0104->U+0105, U+0105, U+0106->U+0107, U+0107, U+0108->U+0109,U+0109, U+010A->U+010B, U+010B, U+010C->U+010D, U+010D, U+010E->U+010F, U+010F,U+0110->U+0111, U+0111, U+0112->U+0113, U+0113, U+0114->U+0115, U+0115, U+0116->U+0117,U+0117, U+0118->U+0119, U+0119, U+011A->U+011B, U+011B, U+011C->U+011D, U+011D,U+011E->U+011F, U+011F, U+0130->U+0131, U+0131, U+0132->U+0133, U+0133, U+0134->U+0135,U+0135, U+0136->U+0137, U+0137, U+0139->U+013A, U+013A, U+013B->U+013C, U+013C,U+013D->U+013E, U+013E, U+013F->U+0140, U+0140, U+0141->U+0142, U+0142, U+0143->U+0144,U+0144, U+0145->U+0146, U+0146, U+0147->U+0148, U+0148, U+014A->U+014B, U+014B,U+014C->U+014D, U+014D, U+014E->U+014F, U+014F, U+0150->U+0151, U+0151, U+0152->U+0153,U+0153, U+0154->U+0155, U+0155, U+0156->U+0157, U+0157, U+0158->U+0159, U+0159,U+015A->U+015B, U+015B, U+015C->U+015D, U+015D, U+015E->U+015F, U+015F, U+0160->U+0161,U+0161, U+0162->U+0163, U+0163, U+0164->U+0165, U+0165, U+0166->U+0167, U+0167,U+0168->U+0169, U+0169, U+016A->U+016B, U+016B, U+016C->U+016D, U+016D, U+016E->U+016F,U+016F, U+0170->U+0171, U+0171, U+0172->U+0173, U+0173, U+0174->U+0175, U+0175,U+0176->U+0177, U+0177, U+0178->U+00FF, U+00FF, U+0179->U+017A, U+017A, U+017B->U+017C,U+017C, U+017D->U+017E, U+017E, U+0410..U+042F->U+0430..U+044F, U+0430..U+044F,U+05D0..U+05EA, U+0531..U+0556->U+0561..U+0586, U+0561..U+0587, U+0621..U+063A, U+01B9,U+01BF, U+0640..U+064A, U+0660..U+0669, U+066E, U+066F, U+0671..U+06D3, U+06F0..U+06FF,U+0904..U+0939, U+0958..U+095F, U+0960..U+0963, U+0966..U+096F, U+097B..U+097F,U+0985..U+09B9, U+09CE, U+09DC..U+09E3, U+09E6..U+09EF, U+0A05..U+0A39, U+0A59..U+0A5E,U+0A66..U+0A6F, U+0A85..U+0AB9, U+0AE0..U+0AE3, U+0AE6..U+0AEF, U+0B05..U+0B39,U+0B5C..U+0B61, U+0B66..U+0B6F, U+0B71, U+0B85..U+0BB9, U+0BE6..U+0BF2, U+0C05..U+0C39,U+0C66..U+0C6F, U+0C85..U+0CB9, U+0CDE..U+0CE3, U+0CE6..U+0CEF, U+0D05..U+0D39, U+0D60,U+0D61, U+0D66..U+0D6F, U+0D85..U+0DC6, U+1900..U+1938, U+1946..U+194F, U+A800..U+A805,U+A807..U+A822, U+0386->U+03B1, U+03AC->U+03B1, U+0388->U+03B5, U+03AD->U+03B5,U+0389->U+03B7, U+03AE->U+03B7, U+038A->U+03B9, U+0390->U+03B9, U+03AA->U+03B9,U+03AF->U+03B9, U+03CA->U+03B9, U+038C->U+03BF, U+03CC->U+03BF, U+038E->U+03C5,U+03AB->U+03C5, U+03B0->U+03C5, U+03CB->U+03C5, U+03CD->U+03C5, U+038F->U+03C9,U+03CE->U+03C9, U+03C2->U+03C3, U+0391..U+03A1->U+03B1..U+03C1,U+03A3..U+03A9->U+03C3..U+03C9, U+03B1..U+03C1, U+03C3..U+03C9, U+0E01..U+0E2E,U+0E30..U+0E3A, U+0E40..U+0E45, U+0E47, U+0E50..U+0E59, U+A000..U+A48F, U+4E00..U+9FBF,U+3400..U+4DBF, U+20000..U+2A6DF, U+F900..U+FAFF, U+2F800..U+2FA1F, U+2E80..U+2EFF,U+2F00..U+2FDF, U+3100..U+312F, U+31A0..U+31BF, U+3040..U+309F, U+30A0..U+30FF,U+31F0..U+31FF, U+AC00..U+D7AF, U+1100..U+11FF, U+3130..U+318F, U+A000..U+A48F,U+A490..U+A4CF 
+ngram_len = 1 
+ngram_chars = U+4E00..U+9FBF, U+3400..U+4DBF, U+20000..U+2A6DF, U+F900..U+FAFF,U+2F800..U+2FA1F, U+2E80..U+2EFF, U+2F00..U+2FDF, U+3100..U+312F, U+31A0..U+31BF,U+3040..U+309F, U+30A0..U+30FF, U+31F0..U+31FF, U+AC00..U+D7AF, U+1100..U+11FF,U+3130..U+318F, U+A000..U+A48F, U+A490..U+A4CF 
+} 
+ 
+# 增量用户 
+source useraddsrc 
+{ 
+type= mysql 
+ 
+sql_host= 127.0.0.1 
+sql_user= root 
+sql_pass= 123456 
+sql_db= sphinx 
+sql_port= 3306 
+sql_query_pre = SET NAMES UTF8 
+sql_query = SELECT id,name,info FROM user WHERE id>(SELECT max_doc_id FROM search_counter WHERE counterid=1) #增量索引是id大于标识位置的部分 
+#sql_attr_uint = name 
+sql_query_info= SELECT * FROM user WHERE id=$id
+} 
+ 
+index useradd
+{ 
+source= useraddsrc 
+path= /opt/server/sphinx/var/data/useradd
+docinfo = extern 
+mlock = 0 
+min_prefix_len= 0 
+min_infix_len = 0 
+min_word_len= 1 
+charset_type= utf-8 
+charset_table = U+FF10..U+FF19->0..9, 0..9, U+FF41..U+FF5A->a..z, U+FF21..U+FF3A->a..z,A..Z->a..z, a..z, U+0149, U+017F, U+0138, U+00DF, U+00FF, U+00C0..U+00D6->U+00E0..U+00F6,U+00E0..U+00F6, U+00D8..U+00DE->U+00F8..U+00FE, U+00F8..U+00FE, U+0100->U+0101, U+0101,U+0102->U+0103, U+0103, U+0104->U+0105, U+0105, U+0106->U+0107, U+0107, U+0108->U+0109,U+0109, U+010A->U+010B, U+010B, U+010C->U+010D, U+010D, U+010E->U+010F, U+010F,U+0110->U+0111, U+0111, U+0112->U+0113, U+0113, U+0114->U+0115, U+0115, U+0116->U+0117,U+0117, U+0118->U+0119, U+0119, U+011A->U+011B, U+011B, U+011C->U+011D, U+011D,U+011E->U+011F, U+011F, U+0130->U+0131, U+0131, U+0132->U+0133, U+0133, U+0134->U+0135,U+0135, U+0136->U+0137, U+0137, U+0139->U+013A, U+013A, U+013B->U+013C, U+013C,U+013D->U+013E, U+013E, U+013F->U+0140, U+0140, U+0141->U+0142, U+0142, U+0143->U+0144,U+0144, U+0145->U+0146, U+0146, U+0147->U+0148, U+0148, U+014A->U+014B, U+014B,U+014C->U+014D, U+014D, U+014E->U+014F, U+014F, U+0150->U+0151, U+0151, U+0152->U+0153,U+0153, U+0154->U+0155, U+0155, U+0156->U+0157, U+0157, U+0158->U+0159, U+0159,U+015A->U+015B, U+015B, U+015C->U+015D, U+015D, U+015E->U+015F, U+015F, U+0160->U+0161,U+0161, U+0162->U+0163, U+0163, U+0164->U+0165, U+0165, U+0166->U+0167, U+0167,U+0168->U+0169, U+0169, U+016A->U+016B, U+016B, U+016C->U+016D, U+016D, U+016E->U+016F,U+016F, U+0170->U+0171, U+0171, U+0172->U+0173, U+0173, U+0174->U+0175, U+0175,U+0176->U+0177, U+0177, U+0178->U+00FF, U+00FF, U+0179->U+017A, U+017A, U+017B->U+017C,U+017C, U+017D->U+017E, U+017E, U+0410..U+042F->U+0430..U+044F, U+0430..U+044F,U+05D0..U+05EA, U+0531..U+0556->U+0561..U+0586, U+0561..U+0587, U+0621..U+063A, U+01B9,U+01BF, U+0640..U+064A, U+0660..U+0669, U+066E, U+066F, U+0671..U+06D3, U+06F0..U+06FF,U+0904..U+0939, U+0958..U+095F, U+0960..U+0963, U+0966..U+096F, U+097B..U+097F,U+0985..U+09B9, U+09CE, U+09DC..U+09E3, U+09E6..U+09EF, U+0A05..U+0A39, U+0A59..U+0A5E,U+0A66..U+0A6F, U+0A85..U+0AB9, U+0AE0..U+0AE3, U+0AE6..U+0AEF, U+0B05..U+0B39,U+0B5C..U+0B61, U+0B66..U+0B6F, U+0B71, U+0B85..U+0BB9, U+0BE6..U+0BF2, U+0C05..U+0C39,U+0C66..U+0C6F, U+0C85..U+0CB9, U+0CDE..U+0CE3, U+0CE6..U+0CEF, U+0D05..U+0D39, U+0D60,U+0D61, U+0D66..U+0D6F, U+0D85..U+0DC6, U+1900..U+1938, U+1946..U+194F, U+A800..U+A805,U+A807..U+A822, U+0386->U+03B1, U+03AC->U+03B1, U+0388->U+03B5, U+03AD->U+03B5,U+0389->U+03B7, U+03AE->U+03B7, U+038A->U+03B9, U+0390->U+03B9, U+03AA->U+03B9,U+03AF->U+03B9, U+03CA->U+03B9, U+038C->U+03BF, U+03CC->U+03BF, U+038E->U+03C5,U+03AB->U+03C5, U+03B0->U+03C5, U+03CB->U+03C5, U+03CD->U+03C5, U+038F->U+03C9,U+03CE->U+03C9, U+03C2->U+03C3, U+0391..U+03A1->U+03B1..U+03C1,U+03A3..U+03A9->U+03C3..U+03C9, U+03B1..U+03C1, U+03C3..U+03C9, U+0E01..U+0E2E,U+0E30..U+0E3A, U+0E40..U+0E45, U+0E47, U+0E50..U+0E59, U+A000..U+A48F, U+4E00..U+9FBF,U+3400..U+4DBF, U+20000..U+2A6DF, U+F900..U+FAFF, U+2F800..U+2FA1F, U+2E80..U+2EFF,U+2F00..U+2FDF, U+3100..U+312F, U+31A0..U+31BF, U+3040..U+309F, U+30A0..U+30FF,U+31F0..U+31FF, U+AC00..U+D7AF, U+1100..U+11FF, U+3130..U+318F, U+A000..U+A48F,U+A490..U+A4CF 
+ngram_len = 1 
+ngram_chars = U+4E00..U+9FBF, U+3400..U+4DBF, U+20000..U+2A6DF, U+F900..U+FAFF,U+2F800..U+2FA1F, U+2E80..U+2EFF, U+2F00..U+2FDF, U+3100..U+312F, U+31A0..U+31BF,U+3040..U+309F, U+30A0..U+30FF, U+31F0..U+31FF, U+AC00..U+D7AF, U+1100..U+11FF,U+3130..U+318F, U+A000..U+A48F, U+A490..U+A4CF 
+} 
+ 
+# 全部商品 
+source goodsbasesrc 
+{ 
+type= mysql 
+ 
+sql_host= 127.0.0.1 
+sql_user= root 
+sql_pass= 123456 
+sql_db= sphinx 
+sql_port= 3306 
+sql_query_pre = SET NAMES UTF8 
+sql_query_pre = REPLACE INTO search_counter SELECT 2,MAX(id) FROM goods? #创建主索引前更改标识位置 
+sql_query = SELECT id,name,price FROM goods 
+#sql_attr_uint= name 
+ 
+sql_query_info= SELECT * FROM goods WHERE id=$id
+} 
+ 
+index goodsbase 
+{ 
+source= goodsbasesrc 
+path= /opt/server/sphinx/var/data/goodsbase
+docinfo = extern 
+mlock = 0 
+min_prefix_len= 0 
+min_infix_len = 0 
+min_word_len= 1 
+charset_type= utf-8 
+charset_table = U+FF10..U+FF19->0..9, 0..9, U+FF41..U+FF5A->a..z, U+FF21..U+FF3A->a..z,A..Z->a..z, a..z, U+0149, U+017F, U+0138, U+00DF, U+00FF, U+00C0..U+00D6->U+00E0..U+00F6,U+00E0..U+00F6, U+00D8..U+00DE->U+00F8..U+00FE, U+00F8..U+00FE, U+0100->U+0101, U+0101,U+0102->U+0103, U+0103, U+0104->U+0105, U+0105, U+0106->U+0107, U+0107, U+0108->U+0109,U+0109, U+010A->U+010B, U+010B, U+010C->U+010D, U+010D, U+010E->U+010F, U+010F,U+0110->U+0111, U+0111, U+0112->U+0113, U+0113, U+0114->U+0115, U+0115, U+0116->U+0117,U+0117, U+0118->U+0119, U+0119, U+011A->U+011B, U+011B, U+011C->U+011D, U+011D,U+011E->U+011F, U+011F, U+0130->U+0131, U+0131, U+0132->U+0133, U+0133, U+0134->U+0135,U+0135, U+0136->U+0137, U+0137, U+0139->U+013A, U+013A, U+013B->U+013C, U+013C,U+013D->U+013E, U+013E, U+013F->U+0140, U+0140, U+0141->U+0142, U+0142, U+0143->U+0144,U+0144, U+0145->U+0146, U+0146, U+0147->U+0148, U+0148, U+014A->U+014B, U+014B,U+014C->U+014D, U+014D, U+014E->U+014F, U+014F, U+0150->U+0151, U+0151, U+0152->U+0153,U+0153, U+0154->U+0155, U+0155, U+0156->U+0157, U+0157, U+0158->U+0159, U+0159,U+015A->U+015B, U+015B, U+015C->U+015D, U+015D, U+015E->U+015F, U+015F, U+0160->U+0161,U+0161, U+0162->U+0163, U+0163, U+0164->U+0165, U+0165, U+0166->U+0167, U+0167,U+0168->U+0169, U+0169, U+016A->U+016B, U+016B, U+016C->U+016D, U+016D, U+016E->U+016F,U+016F, U+0170->U+0171, U+0171, U+0172->U+0173, U+0173, U+0174->U+0175, U+0175,U+0176->U+0177, U+0177, U+0178->U+00FF, U+00FF, U+0179->U+017A, U+017A, U+017B->U+017C,U+017C, U+017D->U+017E, U+017E, U+0410..U+042F->U+0430..U+044F, U+0430..U+044F,U+05D0..U+05EA, U+0531..U+0556->U+0561..U+0586, U+0561..U+0587, U+0621..U+063A, U+01B9,U+01BF, U+0640..U+064A, U+0660..U+0669, U+066E, U+066F, U+0671..U+06D3, U+06F0..U+06FF,U+0904..U+0939, U+0958..U+095F, U+0960..U+0963, U+0966..U+096F, U+097B..U+097F,U+0985..U+09B9, U+09CE, U+09DC..U+09E3, U+09E6..U+09EF, U+0A05..U+0A39, U+0A59..U+0A5E,U+0A66..U+0A6F, U+0A85..U+0AB9, U+0AE0..U+0AE3, U+0AE6..U+0AEF, U+0B05..U+0B39,U+0B5C..U+0B61, U+0B66..U+0B6F, U+0B71, U+0B85..U+0BB9, U+0BE6..U+0BF2, U+0C05..U+0C39,U+0C66..U+0C6F, U+0C85..U+0CB9, U+0CDE..U+0CE3, U+0CE6..U+0CEF, U+0D05..U+0D39, U+0D60,U+0D61, U+0D66..U+0D6F, U+0D85..U+0DC6, U+1900..U+1938, U+1946..U+194F, U+A800..U+A805,U+A807..U+A822, U+0386->U+03B1, U+03AC->U+03B1, U+0388->U+03B5, U+03AD->U+03B5,U+0389->U+03B7, U+03AE->U+03B7, U+038A->U+03B9, U+0390->U+03B9, U+03AA->U+03B9,U+03AF->U+03B9, U+03CA->U+03B9, U+038C->U+03BF, U+03CC->U+03BF, U+038E->U+03C5,U+03AB->U+03C5, U+03B0->U+03C5, U+03CB->U+03C5, U+03CD->U+03C5, U+038F->U+03C9,U+03CE->U+03C9, U+03C2->U+03C3, U+0391..U+03A1->U+03B1..U+03C1,U+03A3..U+03A9->U+03C3..U+03C9, U+03B1..U+03C1, U+03C3..U+03C9, U+0E01..U+0E2E,U+0E30..U+0E3A, U+0E40..U+0E45, U+0E47, U+0E50..U+0E59, U+A000..U+A48F, U+4E00..U+9FBF,U+3400..U+4DBF, U+20000..U+2A6DF, U+F900..U+FAFF, U+2F800..U+2FA1F, U+2E80..U+2EFF,U+2F00..U+2FDF, U+3100..U+312F, U+31A0..U+31BF, U+3040..U+309F, U+30A0..U+30FF,U+31F0..U+31FF, U+AC00..U+D7AF, U+1100..U+11FF, U+3130..U+318F, U+A000..U+A48F,U+A490..U+A4CF 
+ngram_len = 1 
+ngram_chars = U+4E00..U+9FBF, U+3400..U+4DBF, U+20000..U+2A6DF, U+F900..U+FAFF,U+2F800..U+2FA1F, U+2E80..U+2EFF, U+2F00..U+2FDF, U+3100..U+312F, U+31A0..U+31BF,U+3040..U+309F, U+30A0..U+30FF, U+31F0..U+31FF, U+AC00..U+D7AF, U+1100..U+11FF,U+3130..U+318F, U+A000..U+A48F, U+A490..U+A4CF 
+} 
+ 
+# 增量商品 
+source goodsaddsrc 
+{ 
+type= mysql 
+ 
+sql_host= 127.0.0.1 
+sql_user= root 
+sql_pass= 123456 
+sql_db= sphinx 
+sql_port= 3306 
+sql_query_pre = SET NAMES UTF8 
+sql_query = SELECT id,name,price FROM goods WHERE id>(SELECT max_doc_id FROM search_counter WHERE counterid=2) #增量索引是id大于标识位置的部分 
+#sql_attr_uint = name 
+sql_query_info= SELECT * FROM goods WHERE id=$id
+} 
+ 
+index goodsadd 
+{ 
+source= goodsaddsrc 
+path= /opt/server/sphinx/var/data/goodsadd
+docinfo = extern 
+mlock = 0 
+min_prefix_len= 0 
+min_infix_len = 0 
+min_word_len= 1 
+charset_type= utf-8 
+charset_table = U+FF10..U+FF19->0..9, 0..9, U+FF41..U+FF5A->a..z, U+FF21..U+FF3A->a..z,A..Z->a..z, a..z, U+0149, U+017F, U+0138, U+00DF, U+00FF, U+00C0..U+00D6->U+00E0..U+00F6,U+00E0..U+00F6, U+00D8..U+00DE->U+00F8..U+00FE, U+00F8..U+00FE, U+0100->U+0101, U+0101,U+0102->U+0103, U+0103, U+0104->U+0105, U+0105, U+0106->U+0107, U+0107, U+0108->U+0109,U+0109, U+010A->U+010B, U+010B, U+010C->U+010D, U+010D, U+010E->U+010F, U+010F,U+0110->U+0111, U+0111, U+0112->U+0113, U+0113, U+0114->U+0115, U+0115, U+0116->U+0117,U+0117, U+0118->U+0119, U+0119, U+011A->U+011B, U+011B, U+011C->U+011D, U+011D,U+011E->U+011F, U+011F, U+0130->U+0131, U+0131, U+0132->U+0133, U+0133, U+0134->U+0135,U+0135, U+0136->U+0137, U+0137, U+0139->U+013A, U+013A, U+013B->U+013C, U+013C,U+013D->U+013E, U+013E, U+013F->U+0140, U+0140, U+0141->U+0142, U+0142, U+0143->U+0144,U+0144, U+0145->U+0146, U+0146, U+0147->U+0148, U+0148, U+014A->U+014B, U+014B,U+014C->U+014D, U+014D, U+014E->U+014F, U+014F, U+0150->U+0151, U+0151, U+0152->U+0153,U+0153, U+0154->U+0155, U+0155, U+0156->U+0157, U+0157, U+0158->U+0159, U+0159,U+015A->U+015B, U+015B, U+015C->U+015D, U+015D, U+015E->U+015F, U+015F, U+0160->U+0161,U+0161, U+0162->U+0163, U+0163, U+0164->U+0165, U+0165, U+0166->U+0167, U+0167,U+0168->U+0169, U+0169, U+016A->U+016B, U+016B, U+016C->U+016D, U+016D, U+016E->U+016F,U+016F, U+0170->U+0171, U+0171, U+0172->U+0173, U+0173, U+0174->U+0175, U+0175,U+0176->U+0177, U+0177, U+0178->U+00FF, U+00FF, U+0179->U+017A, U+017A, U+017B->U+017C,U+017C, U+017D->U+017E, U+017E, U+0410..U+042F->U+0430..U+044F, U+0430..U+044F,U+05D0..U+05EA, U+0531..U+0556->U+0561..U+0586, U+0561..U+0587, U+0621..U+063A, U+01B9,U+01BF, U+0640..U+064A, U+0660..U+0669, U+066E, U+066F, U+0671..U+06D3, U+06F0..U+06FF,U+0904..U+0939, U+0958..U+095F, U+0960..U+0963, U+0966..U+096F, U+097B..U+097F,U+0985..U+09B9, U+09CE, U+09DC..U+09E3, U+09E6..U+09EF, U+0A05..U+0A39, U+0A59..U+0A5E,U+0A66..U+0A6F, U+0A85..U+0AB9, U+0AE0..U+0AE3, U+0AE6..U+0AEF, U+0B05..U+0B39,U+0B5C..U+0B61, U+0B66..U+0B6F, U+0B71, U+0B85..U+0BB9, U+0BE6..U+0BF2, U+0C05..U+0C39,U+0C66..U+0C6F, U+0C85..U+0CB9, U+0CDE..U+0CE3, U+0CE6..U+0CEF, U+0D05..U+0D39, U+0D60,U+0D61, U+0D66..U+0D6F, U+0D85..U+0DC6, U+1900..U+1938, U+1946..U+194F, U+A800..U+A805,U+A807..U+A822, U+0386->U+03B1, U+03AC->U+03B1, U+0388->U+03B5, U+03AD->U+03B5,U+0389->U+03B7, U+03AE->U+03B7, U+038A->U+03B9, U+0390->U+03B9, U+03AA->U+03B9,U+03AF->U+03B9, U+03CA->U+03B9, U+038C->U+03BF, U+03CC->U+03BF, U+038E->U+03C5,U+03AB->U+03C5, U+03B0->U+03C5, U+03CB->U+03C5, U+03CD->U+03C5, U+038F->U+03C9,U+03CE->U+03C9, U+03C2->U+03C3, U+0391..U+03A1->U+03B1..U+03C1,U+03A3..U+03A9->U+03C3..U+03C9, U+03B1..U+03C1, U+03C3..U+03C9, U+0E01..U+0E2E,U+0E30..U+0E3A, U+0E40..U+0E45, U+0E47, U+0E50..U+0E59, U+A000..U+A48F, U+4E00..U+9FBF,U+3400..U+4DBF, U+20000..U+2A6DF, U+F900..U+FAFF, U+2F800..U+2FA1F, U+2E80..U+2EFF,U+2F00..U+2FDF, U+3100..U+312F, U+31A0..U+31BF, U+3040..U+309F, U+30A0..U+30FF,U+31F0..U+31FF, U+AC00..U+D7AF, U+1100..U+11FF, U+3130..U+318F, U+A000..U+A48F,U+A490..U+A4CF 
+ngram_len = 1 
+ngram_chars = U+4E00..U+9FBF, U+3400..U+4DBF, U+20000..U+2A6DF, U+F900..U+FAFF,U+2F800..U+2FA1F, U+2E80..U+2EFF, U+2F00..U+2FDF, U+3100..U+312F, U+31A0..U+31BF,U+3040..U+309F, U+30A0..U+30FF, U+31F0..U+31FF, U+AC00..U+D7AF, U+1100..U+11FF,U+3130..U+318F, U+A000..U+A48F, U+A490..U+A4CF 
+} 
+ 
+indexer 
+{ 
+mem_limit = 128M 
+} 
+ 
+searchd 
+{ 
+listen= 9312 
+log = /opt/server/sphinx/var/log/searchd.log 
+query_log = /opt/server/sphinx/var/log/query.log 
+read_timeout= 5 
+max_children= 30 
+pid_file= /opt/server/sphinx/var/log/searchd.pid 
+max_matches = 1000 
+seamless_rotate = 1 
+preopen_indexes = 1 
+unlink_old= 1 
+workers = threads # for RT to work 
+binlog_path = /opt/server/sphinx/var/data
+}
+3、索引，启动服务
+
+1
+2
+# /opt/server/sphinx/bin/indexer --all 
+# /opt/server/sphinx/bin/searchd
+4、索引方案
+索引策略
+1、搜索时，同时从主索引和增量索引取数据
+2、每5分钟，运行一次增量索引；满足新数据搜索需求
+3、不同表的索引，分别执行方可
+4、每晚，运行一次主索引，同时会更新索引标示；再运行增量索引，实质为清空增量索引，避免与主索引重复索引
+5、好处：避免开合并索引，合并索引效率较差
+6、如数据量特别大，可考虑合并索引的方案
+索引策略shell
+
+//add.sh 
+#!/bin/sh 
+/opt/server/sphinx/bin/indexer useradd goodsadd --rotate >> /opt/server/sphinx/var/log/add.sh.log
+//all.sh 
+#!/bin/sh 
+/opt/server/sphinx/bin/indexer userbase goodsbase --rotate >> /opt/server/sphinx/var/log/all.sh.log 
+/opt/server/sphinx/bin/indexer useradd goodsadd --rotate >> /opt/server/sphinx/var/log/add.sh.log
+5、测试程序
+
+<?php 
+ 
+$b_time = microtime(true); 
+echo '<p>'.$b_time.'</p>'; 
+ 
+//搜索词 
+$key = trim($_GET['k']); 
+//搜索类型 
+$type = trim($_GET['t']); 
+ 
+switch ($type) 
+{ 
+ case 'all': 
+ $index = 'useradd,userbase,goodsadd,goodsbase'; 
+ break; 
+ case 'user': 
+ $index = 'useradd,userbase'; 
+ break; 
+ case 'goods': 
+ $index = 'goodsadd,goodsbase'; 
+ break; 
+ default: 
+ $index = 'useradd,userbase,goodsadd,goodsbase'; 
+} 
+ 
+//========================================分词 
+$so = scws_new(); 
+$so->set_charset('utf-8'); 
+//默认词库 
+$so->add_dict(ini_get('scws.default.fpath') . '/dict.utf-8.xdb'); 
+//自定义词库 
+$so->add_dict('./dd.txt',SCWS_XDICT_TXT); 
+//默认规则 
+$so->set_rule(ini_get('scws.default.fpath') . '/rules.utf-8.ini'); 
+ 
+//设定分词返回结果时是否去除一些特殊的标点符号 
+$so->set_ignore(true); 
+ 
+//设定分词返回结果时是否复式分割，如“中国人”返回“中国＋人＋中国人”三个词。 
+// 按位异或的 1 | 2 | 4 | 8 分别表示: 短词 | 二元 | 主要单字 | 所有单字 
+//1,2,4,8 分别对应常量 SCWS_MULTI_SHORT? SCWS_MULTI_DUALITY SCWS_MULTI_ZMAIN SCWS_MULTI_ZALL 
+$so->set_multi(false); 
+ 
+//设定是否将闲散文字自动以二字分词法聚合 
+$so->set_duality(false); 
+ 
+//设定搜索词 
+$so->send_text($key); 
+$words_array = $so->get_result(); 
+foreach($words_array as $v) 
+{ 
+ $words = $words.'|('.$v['word'].')'; 
+} 
+ 
+//加入全词 
+#$words = '('.$key.')'.$words; 
+$words = trim($words,'|'); 
+$so->close(); 
+ 
+echo '<p>输入：'.$key.'</p>'; 
+echo '<p>分词：'.$words.'</p>'; 
+//var_dump($words); 
+//exit; 
+ 
+//========================================搜索 
+#require_once 'sphinxapi.php'; 
+$sc = new SphinxClient(); 
+$sc->SetServer('127.0.0.1',9312); 
+#$sc->SetMatchMode(SPH_MATCH_ALL); 
+$sc->SetMatchMode(SPH_MATCH_EXTENDED); 
+$sc->SetArrayResult(TRUE); 
+$res = $sc->Query($words,$index); 
+ 
+var_dump($res); 
+ 
+$e_time = microtime(true); 
+$time = $e_time - $b_time; 
+echo '<p>'.$e_time.'</p>'; 
+echo '<p>'.$time.'</p>'; 
+exit; 
+?>
+5.1 加入用户信息测试
+
+
+-- 
+-- 转存表中的数据 `goods` 
+--
+INSERT INTO `goods` (`id`, `name`, `price`) VALUES 
+(1, '伤心纸杯的钢板哥哥', 20), 
+(2, '钢板他哥哥', 30), 
+(3, '钢板哥哥', 20), 
+(4, '钢板他的哥哥', 65);
+-- 
+-- 转存表中的数据 `user` 
+--
+INSERT INTO `user` (`id`, `name`, `info`) VALUES 
+(1, '钢板哥哥', '我是钢板哥，我来自四川，喜欢吃辣椒，也喜欢妹纸。');
+5.2 类别商品 多个关键字对比
+
+
+关键字 钢板 
+分词：(钢板) 
+结果： 排序/权值 
+1/2304
+2/2304
+3/2304
+4/2304
+关键字 钢板哥哥 
+分词：(钢板)|(哥哥) 
+结果：排序/权值 
+1/4279
+3/4279
+2/3279
+4/2279
+关键字 钢板他哥哥 
+分词：(钢板)|(他)|(哥哥) 
+结果： 排序/权值 
+2/5349
+4/4349
+1/3334
+3/3334
+关键字 钢板的哥哥 
+分词：(钢板)|(的)|(哥哥) 
+结果： 排序/权值 
+2/4334
+1/3349
+4/3349
+3/3334
+6、小结
+通过分词 和 采用 SPH_MATCH_EXTENDED (Sphinx内部查询语言的表达式) 模式；
+能获取较好的搜索结果，排序和权值都是比较理想的。
+7、优化扩展
+7.1
+如访问量较大，可将分词结果添加一层memecache，避免每次调用分词接口。
+7.2
+本文的的准实时索引，只对新增数据有效，如修改了老数据的内容则不能及时索引。
+补充方案:(基于性能，不推荐)
+7.2.1 全文重新索引
+7.2.1在启一个索引为 updategoods，当数据发生改变时候，将来变化数据ID存如数据库，动态读取更新；
+定时将更新的数据merge到主索引
+7.3 词语高亮
+利用API，SphinxClient::buildExcerpts可实现对关键词加入标签高亮
+
+1
+public array SphinxClient::buildExcerpts ( array $docs , string $index , string $words [, array $opts ] )
+$opts 可实现对索引ID，搜索出的详情数组；进行匹配处理，得出理想的搜索结果。具体参数，见PHP手册。
+8、全文搜索
+由于sphinx索引ID唯一的问题，跨表的全文搜索不能直接实现；即，不能简单通过查询多个索引而获得结果；
+不过通过如下方式，亦可实现全文搜索。
+方案A
+可在索引时对每个表的ID进行处理；
+如：SELECT (id+1000000) AS id,name,price FROM goods;
+在提供外部使用时，根据规则（如：ID > 1000000 为商品类）还原相应ID即可。
+方案B
+将数据来源存储为一个属性,将类比在属性中返回；获得的结果集中，可通过source_id进行类别区分了；如下：
+
+
+source src1
+{
+sql_query = SELECT id, 1 AS source_id FROM table1
+sql_attr_uint = source_id
+…
+}
+source src2
+{
+sql_query = SELECT id, 2 AS source_id FROM table2
+sql_attr_uint = source_id
+…
+}
